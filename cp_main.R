@@ -11,6 +11,8 @@ suppressPackageStartupMessages({
   library(tibble)
 })
 
+setwd(dir = "/phi/sbi/chest_pain/cp_github_files/")
+
 # -------------------------------
 # Configuration
 # -------------------------------
@@ -23,34 +25,15 @@ api_url <- Sys.getenv(
   "AZURE_OPENAI_RESPONSES_URL",
   unset = "https://researchinformatics-che-resource.cognitiveservices.azure.com/openai/responses?api-version=2025-04-01-preview"
 )
-api_key <- Sys.getenv("AZURE_OPENAI_API_KEY", unset = "")
+
+key_df <- read_csv(file = "/phi/sbi/chest_pain/cp_key.csv")
+
+api_key <- key_df$key
 model_name <- Sys.getenv("AZURE_OPENAI_DEPLOYMENT", unset = "cp_5.2")
 
 # Set TRUE to submit each note to the API.
-run_api_requests <- FALSE
+run_api_requests <- TRUE
 
-# -------------------------------
-# Helpers
-# -------------------------------
-read_prompt_file <- function() {
-  if (file.exists("init_prompt.txt")) {
-    return(readr::read_file("init_prompt.txt"))
-  }
-
-  if (file.exists("init_prompt.rtf")) {
-    raw_rtf <- paste(readLines("init_prompt.rtf", warn = FALSE, encoding = "UTF-8"), collapse = "\n")
-    # Minimal RTF-to-text cleanup for prompt use.
-    txt <- raw_rtf |>
-      str_replace_all("\\\\par[d]?", "\n") |>
-      str_replace_all("\\\\'[0-9a-fA-F]{2}", "") |>
-      str_replace_all("\\\\[a-zA-Z]+-?[0-9]* ?", "") |>
-      str_replace_all("[{}]", "") |>
-      str_squish()
-    return(txt)
-  }
-
-  stop("Could not find init_prompt.txt or init_prompt.rtf in the working directory.")
-}
 
 normalize_colnames <- function(df) {
   names(df) <- names(df) |>
@@ -79,10 +62,7 @@ build_user_payload <- function(row) {
     "- ecg_performed: ", row$ecg_yn, "\n",
     "- ecg_summary: ", row$ecg_summary, "\n\n",
     "Clinical note:\n",
-    row$extracted_note, "\n\n",
-    "Return ONLY valid JSON with keys exactly: ",
-    "patient_id, auc_category, rationale, supporting_phrases, confidence_score. ",
-    "supporting_phrases must be an array of direct quotes from the note."
+    row$extracted_note
   )
 }
 
@@ -107,24 +87,120 @@ extract_response_text <- function(resp_obj) {
 }
 
 parse_model_json <- function(txt) {
-  if (is.na(txt) || !nzchar(txt)) return(list())
-
-  parsed <- tryCatch(fromJSON(txt, simplifyVector = FALSE), error = function(e) NULL)
-  if (!is.null(parsed)) return(parsed)
-
-  # Fallback: extract first JSON object from free text.
-  snippet <- str_extract(txt, "\\{[\\s\\S]*\\}")
-  if (is.na(snippet)) return(list())
-
-  tryCatch(fromJSON(snippet, simplifyVector = FALSE), error = function(e) list())
+  if (is.na(txt) || !nzchar(txt)) return(NULL)
+  tryCatch(
+    fromJSON(txt, simplifyVector = FALSE),
+    error = function(e) NULL
+  )
 }
+
+auc_json_schema <- function() {
+  list(
+    type = "json_schema",
+    name = "chest_pain_auc_result",
+    strict = TRUE,
+    schema = list(
+      type = "object",
+      additionalProperties = FALSE,
+      properties = list(
+        patient_id = list(
+          type = "string",
+          description = "Patient CSN as a string."
+        ),
+        auc_category = list(
+          type = "string",
+          enum = c("Appropriate", "May Be Appropriate", "Rarely Appropriate")
+        ),
+        rationale = list(
+          type = "string",
+          description = "One to two sentence rationale based directly on the note."
+        ),
+        supporting_phrases = list(
+          type = "array",
+          description = "Direct quotes copied from the note.",
+          items = list(type = "string")
+        ),
+        confidence_score = list(
+          type = "integer",
+          enum = 1:5,
+          description = "Confidence score from 1 to 5."
+        )
+      ),
+      required = c(
+        "patient_id",
+        "auc_category",
+        "rationale",
+        "supporting_phrases",
+        "confidence_score"
+      )
+    )
+  )
+}
+
 
 # -------------------------------
 # Load data
 # -------------------------------
-prompt_text <- read_prompt_file()
+prompt_text <- "You are a clinical reasoning assistant with expertise in pediatric cardiology. Your task is to read outpatient clinical notes from pediatric cardiology visits for patients whose chief complaint is chest pain. You will use these notes to determine whether an echocardiogram is Appropriate, May Be Appropriate, or Rarely Appropriate based on the 2014 Appropriate Use Criteria (AUC) for Initial Transthoracic Echocardiography in Outpatient Pediatric Cardiology.
+You should identify key symptoms, family history elements, physical exam findings, and ECG findings when present.
+You must classify the note using the following categories:
 
-df <- read_xlsx(path = excel_path) |>
+a. Appropriate
+  i. Exertional chest pain
+  ii. Non-exertional chest pain with abnormal ECG
+  iii. Chest pain with family history of sudden unexplained death or cardiomyopathy.
+
+b. May Be Appropriate
+  i. Chest pain with other symptoms or signs of cardiovascular disease, a benign family history, and a normal ECG
+  ii. Chest pain with family history of premature coronary artery disease
+  iii. Chest pain with recent onset of fever
+  iv. Chest pain with recent illicit drug use
+
+c. Rarely Appropriate
+  i. Chest pain with no other symptoms or signs of cardiovascular disease, a benign family history, and a normal ECG
+  ii. Non-exertional chest pain with no recent ECG
+  iii. Non-exertional chest pain with normal ECG
+  iv. Reproducible chest pain with palpation or deep inspiration
+
+You must provide a brief rationale (one to two sentences) explaining why you chose that category. Your rationale should refer directly to specific findings described in the note. Also list the specific phrases from the note that support your conclusion. You must assign a confidence score from 1 (low confidence) to 5 (complete confidence).
+
+The following is clarification for some of the phrases in the appropriate use criteria above:
+1.	Other symptoms or signs of cardiovascular disease
+
+Examples of this could include:
+  i. Symptoms of cardiovascular disease such as (but not limited to) exertional syncope or presyncope, exertional dyspnea out of proportion to peers, palpitations, or orthopnea
+  ii. Abnormal vital signs indicative of heart disease such as (but not limited to) unexplained tachycardia or hypotension for age
+  iii. Abnormal cardiovascular exam such as (but not limited to) a pathologic murmur, gallop, hepatomegaly, rales, or peripheral edema
+
+2.	Recent onset of fever
+
+Treat as present if the note documents subjective or objective fever ≥ 38.0°C (100.4°F) that started within the past 14 days
+Examples include phrases like:
+  i. Fever to 102°F yesterday with chest pain.
+  ii. Several days of fever this week and now chest pain.
+  iii. Viral illness with fever over the 2 weeks.
+
+3.	Premature coronary artery disease in the family
+
+Treat as present if there is a history in a first-degree relative (parent, sibling) of:
+  i. Myocardial infarction, coronary stent, or coronary artery bypass grafting (CABG) before age 55 in males or before age 65 in females, or
+  ii. Sudden cardiac death due to presumed myocardial ischemia in those age ranges.
+
+Examples include phrases like:
+  i. Father had an MI at 48 and needed a stent.
+  ii. Mother had bypass surgery at 52.
+  iii. Dad died suddenly of a heart attack in his early 50s.
+
+Return your answer using the required structured output fields.
+For supporting_phrases, provide an array of direct quotes copied verbatim from the note.
+For rationale, provide 1–2 sentences.
+For confidence_score, return an integer from 1 to 5.
+"
+
+
+
+
+df <- read_excel("/phi/sbi/chest_pain/sample_cp.xlsx") |>
   normalize_colnames()
 
 required_cols <- c("csn", "mrn", "visitage", "sex", "chiefcomp", "visitdiagnc", "ecg_yn", "ecg_summary", "extracted_note")
@@ -144,7 +220,7 @@ requests_tbl <- df |>
     patient_id,
     body = pmap(
       list(patient_id, mrn, visitage, sex, chiefcomp, visitdiagnc, ecg_yn, ecg_summary, extracted_note),
-      \(patient_id, mrn, visitage, sex, chiefcomp, visitdiagnc, ecg_yn, ecg_summary, extracted_note) {
+      function(patient_id, mrn, visitage, sex, chiefcomp, visitdiagnc, ecg_yn, ecg_summary, extracted_note) {
         row <- list(
           patient_id = patient_id,
           mrn = mrn,
@@ -159,11 +235,11 @@ requests_tbl <- df |>
 
         list(
           model = model_name,
-          input = list(
-            list(role = "system", content = prompt_text),
-            list(role = "user", content = build_user_payload(row))
-          ),
-          temperature = 0
+          instructions = prompt_text,
+          input = build_user_payload(row),
+          text = list(
+            format = auc_json_schema()
+          )
         )
       }
     )
@@ -195,21 +271,110 @@ message("Wrote JSONL file: ", jsonl_output_path)
 # -------------------------------
 # Optionally submit requests and save outputs
 # -------------------------------
+
+run_api_requests <- TRUE
+
+# if (run_api_requests) {
+#   if (!nzchar(api_key)) {
+#     stop("AZURE_OPENAI_API_KEY is empty. Set it in your environment before enabling run_api_requests.")
+#   }
+#
+#   raw_results <- requests_tbl |>
+#     transmute(custom_id, patient_id, response = map(body, \(b) {
+#       req <- request(api_url) |>
+#         req_method("POST") |>
+#         req_headers(`api-key` = api_key, `Content-Type` = "application/json") |>
+#         req_body_json(b, auto_unbox = TRUE)
+#
+#       resp <- req_perform(req)
+#       resp_body_json(resp, simplifyVector = FALSE)
+#     }))
+#
+#   parsed_results <- raw_results |>
+#     mutate(
+#       output_text = map_chr(response, extract_response_text),
+#       parsed = map(output_text, parse_model_json),
+#       auc_category = map_chr(parsed, ~ .x$auc_category %||% NA_character_),
+#       rationale = map_chr(parsed, ~ .x$rationale %||% NA_character_),
+#       supporting_phrases = map_chr(parsed, ~ {
+#         phrases <- .x$supporting_phrases
+#         if (is.null(phrases)) return(NA_character_)
+#         if (is.character(phrases)) return(paste(phrases, collapse = " | "))
+#         NA_character_
+#       }),
+#       confidence_score = map_dbl(parsed, ~ as.numeric(.x$confidence_score %||% NA_real_))
+#     ) |>
+#     select(patient_id, auc_category, rationale, supporting_phrases, confidence_score, output_text)
+#
+#   write.csv(parsed_results, results_csv_path, row.names = FALSE, na = "")
+#   writeLines(
+#     map_chr(raw_results$response, ~ toJSON(.x, auto_unbox = TRUE, null = "null")),
+#     con = results_raw_json_path,
+#     useBytes = TRUE
+#   )
+#
+#   message("Saved parsed results to: ", results_csv_path)
+#   message("Saved raw JSON responses to: ", results_raw_json_path)
+# } else {
+#   message("run_api_requests is FALSE. JSONL was generated but API calls were skipped.")
+# }
+
+##### QC to understand what's going wrong #####
+
 if (run_api_requests) {
   if (!nzchar(api_key)) {
     stop("AZURE_OPENAI_API_KEY is empty. Set it in your environment before enabling run_api_requests.")
   }
 
   raw_results <- requests_tbl |>
-    transmute(custom_id, patient_id, response = map(body, \(b) {
-      req <- request(api_url) |>
-        req_method("POST") |>
-        req_headers(`api-key` = api_key, `Content-Type` = "application/json") |>
-        req_body_json(b, auto_unbox = TRUE)
+    transmute(
+      custom_id,
+      patient_id,
+      response = map(body, \(b) {
+        req <- request(api_url) |>
+          req_method("POST") |>
+          req_headers(
+            `api-key` = api_key,
+            `Content-Type` = "application/json"
+          ) |>
+          req_body_json(b, auto_unbox = TRUE)
 
-      resp <- req_perform(req)
-      resp_body_json(resp, simplifyVector = FALSE)
-    }))
+        resp <- tryCatch(
+          req_perform(req),
+          error = function(e) {
+            resp <- e$resp
+
+            if (!is.null(resp)) {
+              raw_txt <- tryCatch(
+                resp_body_string(resp),
+                error = function(e2) "<Could not read response body>"
+              )
+
+              stop(
+                paste0(
+                  "Azure request failed.\n",
+                  "Status: ", tryCatch(resp_status(resp), error = function(e2) "unknown"), "\n",
+                  "Content-Type: ", tryCatch(resp_header(resp, "content-type") %||% "", error = function(e2) "unknown"), "\n",
+                  "Body (first 4000 chars):\n",
+                  substr(raw_txt, 1, 4000)
+                ),
+                call. = FALSE
+              )
+            } else {
+              stop(
+                paste0(
+                  "Azure request failed during req_perform(), but no response body was available.\n",
+                  "Original error: ", conditionMessage(e)
+                ),
+                call. = FALSE
+              )
+            }
+          }
+        )
+
+        resp_body_json(resp, simplifyVector = FALSE)
+      })
+    )
 
   parsed_results <- raw_results |>
     mutate(
@@ -220,12 +385,22 @@ if (run_api_requests) {
       supporting_phrases = map_chr(parsed, ~ {
         phrases <- .x$supporting_phrases
         if (is.null(phrases)) return(NA_character_)
-        if (is.character(phrases)) return(paste(phrases, collapse = " | "))
-        NA_character_
+        paste(unlist(phrases), collapse = " | ")
       }),
-      confidence_score = map_dbl(parsed, ~ as.numeric(.x$confidence_score %||% NA_real_))
+      confidence_score = map_dbl(parsed, ~ {
+        x <- .x$confidence_score
+        if (is.null(x) || length(x) != 1) return(NA_real_)
+        suppressWarnings(as.numeric(x))
+      })
     ) |>
-    select(patient_id, auc_category, rationale, supporting_phrases, confidence_score, output_text)
+    select(
+      patient_id,
+      auc_category,
+      rationale,
+      supporting_phrases,
+      confidence_score,
+      output_text
+    )
 
   write.csv(parsed_results, results_csv_path, row.names = FALSE, na = "")
   writeLines(
@@ -236,6 +411,12 @@ if (run_api_requests) {
 
   message("Saved parsed results to: ", results_csv_path)
   message("Saved raw JSON responses to: ", results_raw_json_path)
+
 } else {
   message("run_api_requests is FALSE. JSONL was generated but API calls were skipped.")
 }
+
+
+
+
+
