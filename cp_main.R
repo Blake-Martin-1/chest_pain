@@ -57,8 +57,6 @@ build_user_payload <- function(row) {
     "- mrn: ", row$mrn, "\n",
     "- age_years: ", row$visitage, "\n",
     "- sex: ", row$sex, "\n",
-    "- chief_complaint: ", row$chiefcomp, "\n",
-    "- visit_diagnosis: ", row$visitdiagnc, "\n",
     "- ecg_performed: ", row$ecg_yn, "\n",
     "- ecg_summary: ", row$ecg_summary, "\n\n",
     "Clinical note:\n",
@@ -219,15 +217,13 @@ requests_tbl <- df |>
     custom_id = paste0("cp_", row_number(), "_", patient_id),
     patient_id,
     body = pmap(
-      list(patient_id, mrn, visitage, sex, chiefcomp, visitdiagnc, ecg_yn, ecg_summary, extracted_note),
-      function(patient_id, mrn, visitage, sex, chiefcomp, visitdiagnc, ecg_yn, ecg_summary, extracted_note) {
+      list(patient_id, mrn, visitage, sex, ecg_yn, ecg_summary, extracted_note),
+      function(patient_id, mrn, visitage, sex, ecg_yn, ecg_summary, extracted_note) {
         row <- list(
           patient_id = patient_id,
           mrn = mrn,
           visitage = visitage,
           sex = sex,
-          chiefcomp = chiefcomp,
-          visitdiagnc = visitdiagnc,
           ecg_yn = ecg_yn,
           ecg_summary = ecg_summary,
           extracted_note = extracted_note
@@ -415,7 +411,6 @@ if (run_api_requests) {
 } else {
   message("run_api_requests is FALSE. JSONL was generated but API calls were skipped.")
 }
-
 
 
 
