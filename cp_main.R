@@ -3,6 +3,7 @@
 
 suppressPackageStartupMessages({
   library(readxl)
+  library(readr)
   library(jsonlite)
   library(httr2)
   library(dplyr)
@@ -26,9 +27,9 @@ api_url <- Sys.getenv(
   unset = "https://researchinformatics-che-resource.cognitiveservices.azure.com/openai/responses?api-version=2025-04-01-preview"
 )
 
-key_df <- read_csv(file = "/phi/sbi/chest_pain/cp_key.csv")
+key_df <- readr::read_csv(file = "/phi/sbi/chest_pain/cp_key.csv", show_col_types = FALSE)
 
-api_key <- key_df$key
+api_key <- key_df$key[[1]]
 model_name <- Sys.getenv("AZURE_OPENAI_DEPLOYMENT", unset = "cp_5.2")
 
 # Set TRUE to submit each note to the API.
@@ -85,9 +86,12 @@ extract_response_text <- function(resp_obj) {
 }
 
 parse_model_json <- function(txt) {
-  if (is.na(txt) || !nzchar(txt)) return(NULL)
+  if (is.na(txt)) return(NULL)
+  txt <- stringr::str_trim(txt)
+  if (!nzchar(txt)) return(NULL)
+
   tryCatch(
-    fromJSON(txt, simplifyVector = FALSE),
+    jsonlite::fromJSON(txt, simplifyVector = FALSE),
     error = function(e) NULL
   )
 }
@@ -109,6 +113,11 @@ auc_json_schema <- function() {
           type = "string",
           enum = c("Appropriate", "May Be Appropriate", "Rarely Appropriate")
         ),
+        applicable_auc_criteria = list(
+          type = "array",
+          description = "All AUC criteria applicable to the note.",
+          items = list(type = "string")
+        ),
         rationale = list(
           type = "string",
           description = "One to two sentence rationale based directly on the note."
@@ -127,6 +136,7 @@ auc_json_schema <- function() {
       required = c(
         "patient_id",
         "auc_category",
+        "applicable_auc_criteria",
         "rationale",
         "supporting_phrases",
         "confidence_score"
@@ -139,66 +149,119 @@ auc_json_schema <- function() {
 # -------------------------------
 # Load data
 # -------------------------------
-prompt_text <- "You are a clinical reasoning assistant with expertise in pediatric cardiology. Your task is to read outpatient clinical notes from pediatric cardiology visits for patients whose chief complaint is chest pain. You will use these notes to determine whether an echocardiogram is Appropriate, May Be Appropriate, or Rarely Appropriate based on the 2014 Appropriate Use Criteria (AUC) for Initial Transthoracic Echocardiography in Outpatient Pediatric Cardiology.
-You should identify key symptoms, family history elements, physical exam findings, and ECG findings when present.
-You must classify the note using the following categories:
+prompt_text <- "You are a clinical reasoning assistant with expertise in pediatric cardiology. Your task is to read outpatient clinical notes from pediatric cardiology visits for patients whose chief complaint is chest pain. Using the information in the note, determine whether an echocardiogram is Appropriate, May Be Appropriate, or Rarely Appropriate based on the 2014 Appropriate Use Criteria (AUC) for Initial Transthoracic Echocardiography in Outpatient Pediatric Cardiology.
 
-a. Appropriate
-  i. Exertional chest pain
-  ii. Non-exertional chest pain with abnormal ECG
-  iii. Chest pain with family history of sudden unexplained death or cardiomyopathy.
+You should identify key symptoms, family history elements, physical exam findings, vital signs, and ECG findings when present.
 
-b. May Be Appropriate
-  i. Chest pain with other symptoms or signs of cardiovascular disease, a benign family history, and a normal ECG
-  ii. Chest pain with family history of premature coronary artery disease
-  iii. Chest pain with recent onset of fever
-  iv. Chest pain with recent illicit drug use
+DECISION RULES
 
-c. Rarely Appropriate
-  i. Chest pain with no other symptoms or signs of cardiovascular disease, a benign family history, and a normal ECG
-  ii. Non-exertional chest pain with no recent ECG
-  iii. Non-exertional chest pain with normal ECG
-  iv. Reproducible chest pain with palpation or deep inspiration
+Use the most conservative applicable category.
+- Choose Appropriate if any Appropriate criteria are present.
+- Choose May Be Appropriate only if no Appropriate criteria apply.
+- Choose Rarely Appropriate only if no Appropriate or May Be Appropriate criteria apply.
 
-You must provide a brief rationale (one to two sentences) explaining why you chose that category. Your rationale should refer directly to specific findings described in the note. Also list the specific phrases from the note that support your conclusion. You must assign a confidence score from 1 (low confidence) to 5 (complete confidence).
+AUC CATEGORIES:
 
-The following is clarification for some of the phrases in the appropriate use criteria above:
-1.	Other symptoms or signs of cardiovascular disease
+Appropriate
+Choose Appropriate if any of the following AUC criteria are present:
 
-Examples of this could include:
-  i. Symptoms of cardiovascular disease such as (but not limited to) exertional syncope or presyncope, exertional dyspnea out of proportion to peers, palpitations, or orthopnea
-  ii. Abnormal vital signs indicative of heart disease such as (but not limited to) unexplained tachycardia or hypotension for age
-  iii. Abnormal cardiovascular exam such as (but not limited to) a pathologic murmur, gallop, hepatomegaly, rales, or peripheral edema
+1. Exertional chest pain
+Any chest pain occurring or worse during physical exertion, even if it occurred only once or has resolved.
 
-2.	Recent onset of fever
+2. Non-exertional chest pain with abnormal ECG
+ECG rules
+- If ECG interpretation says 'abnormal' or 'borderline', classify as abnormal regardless of specific findings.
+- If ECG interpretation says 'normal' or 'otherwise normal', classify as normal.
+- If the HPI describes a previous abnormal ECG, count it as abnormal.
+- If a previous ECG was inconclusive, but the current ECG is normal, treat the ECG as normal.
 
-Treat as present if the note documents subjective or objective fever ≥ 38.0°C (100.4°F) that started within the past 14 days
-Examples include phrases like:
-  i. Fever to 102°F yesterday with chest pain.
-  ii. Several days of fever this week and now chest pain.
-  iii. Viral illness with fever over the 2 weeks.
+3. Chest pain with family history of sudden unexplained death or cardiomyopathy
+Definitions
+- Sudden unexplained death: death without a known cause under age 50
+Family history may include:
+- Parents
+- Siblings
+- Grandparents
+- Aunts or uncles
 
-3.	Premature coronary artery disease in the family
+May Be Appropriate
+Choose May Be Appropriate only if no Appropriate criteria apply and one of the following AUC criteria is present.
 
-Treat as present if there is a history in a first-degree relative (parent, sibling) of:
-  i. Myocardial infarction, coronary stent, or coronary artery bypass grafting (CABG) before age 55 in males or before age 65 in females, or
-  ii. Sudden cardiac death due to presumed myocardial ischemia in those age ranges.
+1. Chest pain with other symptoms or signs of cardiovascular disease, a benign family history, and a normal ECG
+Symptoms or signs of cardiovascular disease
+Symptoms:
+- Palpitations
+- 'Heart racing' or similar (assume this refers to palpitations unless explicitly denied)
+- Syncope
+- Exertional presyncope / dizziness / lightheadedness
+- Shortness of breath or dyspnea not explained by another condition (e.g., asthma)
 
-Examples include phrases like:
-  i. Father had an MI at 48 and needed a stent.
-  ii. Mother had bypass surgery at 52.
-  iii. Dad died suddenly of a heart attack in his early 50s.
+Physical exam findings:
+- Cardiac murmur
+- Any abnormal cardiac exam finding documented in the physical exam
 
-Return your answer using the required structured output fields.
-For supporting_phrases, provide an array of direct quotes copied verbatim from the note.
-For rationale, provide 1–2 sentences.
-For confidence_score, return an integer from 1 to 5.
-"
+Benign family history means none of the following:
+- Sudden unexplained death
+- Cardiomyopathy
+- Premature coronary artery disease
+
+2. Chest pain with family history of premature coronary artery disease
+Define premature coronary artery disease as:
+- Myocardial infarction
+- Coronary stent
+- Coronary artery bypass grafting
+- Any coronary artery disease occurring before age 50 in any family member.
+
+3. Chest pain with recent onset of fever
+Definition: Fever >= 38.0 C (100.4 F) within the last two weeks
+
+4. Chest pain with recent illicit drug use
+Definition: Illicit drug use within the past two weeks
+For this study:
+- Marijuana counts as illicit drug use
+
+Rarely Appropriate
+Classify as Rarely Appropriate only if no Appropriate or May Be Appropriate criteria are present. Relevant Rarely Appropriate patterns include:
+1. Chest pain with no other symptoms or signs of cardiovascular disease, benign family history, and normal ECG
+2. Non-exertional chest pain with no recent ECG
+3. Non-exertional chest pain with normal ECG
+4. Reproducible chest pain with palpation or deep inspiration
+
+ADDITIONAL CLARIFICATIONS
+
+Symptoms considered cardiovascular symptoms
+- Palpitations
+- 'Heart racing'
+- Syncope
+- Exertional dizziness / presyncope
+- Dyspnea not explained by another condition
+
+Abnormal cardiovascular exam examples
+- Murmur
+- Gallop
+- Hepatomegaly
+- Rales
+- Peripheral edema
+- Any abnormal cardiac exam finding
+
+OUTPUT INSTRUCTIONS
+
+Return your answer only in the structured JSON format requested by the schema.
+
+Field requirements:
+- patient_id: copy the patient CSN exactly as provided in the input.
+- auc_category: must be exactly one of 'Appropriate', 'May Be Appropriate', or 'Rarely Appropriate'.
+- applicable_auc_criteria: Specify all AUC criteria that were applicable to this note. Include all A criteria, M criteria, and R criteria that apply to the note (e.g., A1 – Exertional chest pain, M1 – Chest pain with other cardiovascular symptoms, R4 – Reproducible chest pain with palpation).
+- rationale: 1 to 2 sentences explaining the classification and explicitly referencing the applicable AUC criterion or criteria.
+- supporting_phrases: an array of direct quotes copied verbatim from the clinical note that support the chosen auc category.
+- confidence_score: an integer from 1 = Low confidence, 2 = Some uncertainty, 3 = Moderate confidence, 4 = High confidence,and 5 = Complete confidence
+
+Do not return pipe-separated text, CSV-style rows, markdown, or any extra keys."
 
 
 
 
-df <- read_excel("/phi/sbi/chest_pain/sample_cp.xlsx") |>
+df <- readxl::read_excel(excel_path) |>
   normalize_colnames()
 
 required_cols <- c("csn", "mrn", "visitage", "sex", "chiefcomp", "visitdiagnc", "ecg_yn", "ecg_summary", "extracted_note")
@@ -265,57 +328,11 @@ writeLines(jsonl_lines, con = jsonl_output_path, useBytes = TRUE)
 message("Wrote JSONL file: ", jsonl_output_path)
 
 # -------------------------------
-# Optionally submit requests and save outputs
+# Submit requests and save outputs
 # -------------------------------
 
 run_api_requests <- TRUE
 
-# if (run_api_requests) {
-#   if (!nzchar(api_key)) {
-#     stop("AZURE_OPENAI_API_KEY is empty. Set it in your environment before enabling run_api_requests.")
-#   }
-#
-#   raw_results <- requests_tbl |>
-#     transmute(custom_id, patient_id, response = map(body, \(b) {
-#       req <- request(api_url) |>
-#         req_method("POST") |>
-#         req_headers(`api-key` = api_key, `Content-Type` = "application/json") |>
-#         req_body_json(b, auto_unbox = TRUE)
-#
-#       resp <- req_perform(req)
-#       resp_body_json(resp, simplifyVector = FALSE)
-#     }))
-#
-#   parsed_results <- raw_results |>
-#     mutate(
-#       output_text = map_chr(response, extract_response_text),
-#       parsed = map(output_text, parse_model_json),
-#       auc_category = map_chr(parsed, ~ .x$auc_category %||% NA_character_),
-#       rationale = map_chr(parsed, ~ .x$rationale %||% NA_character_),
-#       supporting_phrases = map_chr(parsed, ~ {
-#         phrases <- .x$supporting_phrases
-#         if (is.null(phrases)) return(NA_character_)
-#         if (is.character(phrases)) return(paste(phrases, collapse = " | "))
-#         NA_character_
-#       }),
-#       confidence_score = map_dbl(parsed, ~ as.numeric(.x$confidence_score %||% NA_real_))
-#     ) |>
-#     select(patient_id, auc_category, rationale, supporting_phrases, confidence_score, output_text)
-#
-#   write.csv(parsed_results, results_csv_path, row.names = FALSE, na = "")
-#   writeLines(
-#     map_chr(raw_results$response, ~ toJSON(.x, auto_unbox = TRUE, null = "null")),
-#     con = results_raw_json_path,
-#     useBytes = TRUE
-#   )
-#
-#   message("Saved parsed results to: ", results_csv_path)
-#   message("Saved raw JSON responses to: ", results_raw_json_path)
-# } else {
-#   message("run_api_requests is FALSE. JSONL was generated but API calls were skipped.")
-# }
-
-##### QC to understand what's going wrong #####
 
 if (run_api_requests) {
   if (!nzchar(api_key)) {
@@ -376,7 +393,13 @@ if (run_api_requests) {
     mutate(
       output_text = map_chr(response, extract_response_text),
       parsed = map(output_text, parse_model_json),
+      returned_patient_id = map_chr(parsed, ~ .x$patient_id %||% NA_character_),
       auc_category = map_chr(parsed, ~ .x$auc_category %||% NA_character_),
+      applicable_auc_criteria = map_chr(parsed, ~ {
+        x <- .x$applicable_auc_criteria
+        if (is.null(x)) return(NA_character_)
+        paste(unlist(x), collapse = " | ")
+      }),
       rationale = map_chr(parsed, ~ .x$rationale %||% NA_character_),
       supporting_phrases = map_chr(parsed, ~ {
         phrases <- .x$supporting_phrases
@@ -389,9 +412,12 @@ if (run_api_requests) {
         suppressWarnings(as.numeric(x))
       })
     ) |>
-    select(
+    dplyr::select(
+      custom_id,
       patient_id,
+      returned_patient_id,
       auc_category,
+      applicable_auc_criteria,
       rationale,
       supporting_phrases,
       confidence_score,
