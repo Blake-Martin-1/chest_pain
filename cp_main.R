@@ -17,10 +17,11 @@ setwd(dir = "/phi/sbi/chest_pain/cp_github_files/")
 # -------------------------------
 # Configuration
 # -------------------------------
-excel_path <- "/phi/sbi/chest_pain/sample_cp.xlsx"
+excel_path <- "/phi/sbi/chest_pain/gould_cp_full.csv"
 jsonl_output_path <- "cp_requests.jsonl"
 results_csv_path <- "cp_results.csv"
 results_raw_json_path <- "cp_results_raw.json"
+dates_raw_path <- "/phi/sbi/chest_pain/visit_dates.xlsx"
 
 api_url <- Sys.getenv(
   "AZURE_OPENAI_RESPONSES_URL",
@@ -49,6 +50,22 @@ normalize_colnames <- function(df) {
 coalesce_chr <- function(x, y) {
   out <- ifelse(is.na(x) | x == "", y, x)
   as.character(out)
+}
+
+clean_text <- function(x) {
+  x <- as.character(x)
+
+  # Convert from current/native encoding to UTF-8
+  x <- iconv(x, from = "", to = "UTF-8", sub = " ")
+
+  # Remove any remaining control characters except tab/newline if desired
+  x <- stringr::str_replace_all(x, "[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F\\x7F]", " ")
+
+  # Optional: normalize whitespace
+  x <- stringr::str_replace_all(x, "[[:space:]]+", " ")
+  x <- stringr::str_trim(x)
+
+  x
 }
 
 build_user_payload <- function(row) {
@@ -261,8 +278,33 @@ Do not return pipe-separated text, CSV-style rows, markdown, or any extra keys."
 
 
 
-df <- readxl::read_excel(excel_path) |>
-  normalize_colnames()
+df_full <- readr::read_csv(excel_path, show_col_types = FALSE)
+df_full <- df_full %>% rename(chiefcomp = chiefcomplaint, visitdiagnc = visitdiagnosis)
+df_full <- df_full |>
+  normalize_colnames() |>
+  dplyr::mutate(
+    extracted_note = clean_text(extracted_note),
+    ecg_summary    = clean_text(ecg_summary),
+    sex            = clean_text(sex),
+    ecg_yn         = clean_text(ecg_yn),
+    chiefcomp      = clean_text(chiefcomp),
+    visitdiagnc    = clean_text(visitdiagnc)
+  )
+
+# drop useless visit_date column
+df_full <- df_full %>% dplyr::select(-visitdate)
+
+# Load in date info to ensure first 20 used for training, then validation, etc
+dates_raw <-  read_excel(path = dates_raw_path)
+
+
+# Add dates to df_full
+df_full <- df_full %>% left_join(dates_raw %>% dplyr::select(csn, visitdate), by = "csn")
+df_full <- df_full %>% arrange(visitdate)
+
+
+df <- df_full[1:20, ] # 1:20 training set, 21:42 validation, 42:end as test set?
+
 
 required_cols <- c("csn", "mrn", "visitage", "sex", "chiefcomp", "visitdiagnc", "ecg_yn", "ecg_summary", "extracted_note")
 missing_cols <- setdiff(required_cols, names(df))
@@ -438,6 +480,16 @@ if (run_api_requests) {
   message("run_api_requests is FALSE. JSONL was generated but API calls were skipped.")
 }
 
+# QC, ensure that all study_id values match the returned study id values
+print(paste0("# of non-matched study ID values = ", sum(parsed_results$patient_id != parsed_results$returned_patient_id))) # should return 0
 
+# Fix dates df, then bind dates with parsed df
+dates_df <- dates_raw %>% rename(patient_id = csn)
+dates_df$patient_id <- as.character(dates_df$patient_id)
 
+final_model_scores <- parsed_results %>% left_join(dates_df %>% dplyr::select(patient_id, visitdate), by = "patient_id")
+final_model_scores <- final_model_scores %>% relocate(patient_id, returned_patient_id, custom_id, visitdate)
+
+View(final_model_scores %>% dplyr::select(patient_id, returned_patient_id, visitdate, auc_category, applicable_auc_criteria, rationale,
+                                          supporting_phrases, confidence_score) %>% arrange(visitdate))
 
