@@ -18,9 +18,9 @@ setwd(dir = "/phi/sbi/chest_pain/cp_github_files/")
 # Configuration
 # -------------------------------
 excel_path <- "/phi/sbi/chest_pain/gould_cp_full.csv"
-jsonl_output_path <- "cp_requests.jsonl"
-results_csv_path <- "cp_results.csv"
-results_raw_json_path <- "cp_results_raw.json"
+jsonl_output_path <- "/phi/sbi/chest_pain/cp_requests.jsonl"
+results_csv_path <- "/phi/sbi/chest_pain/cp_results.csv"
+results_raw_json_path <- "/phi/sbi/chest_pain/cp_results_raw.json"
 dates_raw_path <- "/phi/sbi/chest_pain/visit_dates.xlsx"
 
 api_url <- Sys.getenv(
@@ -275,6 +275,12 @@ Field requirements:
 
 Do not return pipe-separated text, CSV-style rows, markdown, or any extra keys."
 
+### Code to store current version of prompt ###
+writeLines(
+  prompt_text,
+  con = "phi/sbi/chest_pain/cp_github_files/prompt_v01.txt",
+  useBytes = TRUE
+)
 
 
 
