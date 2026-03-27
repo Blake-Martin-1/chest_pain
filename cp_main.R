@@ -440,47 +440,38 @@ ids$csn <- as.character(ids$csn)
 final_model_scores <- final_model_scores %>% left_join(ids %>% rename(patient_id = csn))
 final_model_scores <- final_model_scores %>% relocate(mrn)
 
-final_model_scores_01 <- final_model_scores <- final_model_scores %>% relocate(mrn)
-final_model_scores_02 <- final_model_scores <- final_model_scores %>% relocate(mrn)
-final_model_scores_03 <- final_model_scores <- final_model_scores %>% relocate(mrn)
+# final_model_scores_01 <- final_model_scores <- final_model_scores %>% relocate(mrn)
+# final_model_scores_02 <- final_model_scores <- final_model_scores %>% relocate(mrn)
+# final_model_scores_03 <- final_model_scores <- final_model_scores %>% relocate(mrn)
 
 # Add on gold standard labels
-gold_val <- data.frame(mrn = c(
-                       2126321,
-                       1929390,
-                       1838794,
-                       2776984,
-                       1418906,
-                       1192161,
-                       1342715,
-                       2795294,
-                       2019100,
-                       2796297,
-                       1452091,
-                       1591829,
-                       1902018,
-                       1629399,
-                       1455106,
-                       2077368,
-                       2799363,
-                       1241864,
-                       2238211,
-                       1572368), truth_label = c(
-  "Appropriate",
-  "Rarely Appropriate",
-  "Rarely Appropriate",
-  "Rarely Appropriate", "Appropriate", "Appropriate", "Rarely Appropriate", "Appropriate", "Appropriate",
-  "Appropriate", "Appropriate", "May Be Appropriate", "May Be Appropriate", "Appropriate", "Appropriate",
-  "Appropriate", "Rarely Appropriate", "May Be Appropriate", "Rarely Appropriate", "Appropriate"
-))
-
-
-
 # Load in gold standard labels
-# gold <- read_xls(path = "/phi/sbi/chest_pain/gold_labels.xlsx")
+gold_raw <- readxl::read_xlsx(path = "/phi/sbi/chest_pain/gold_labels_cp.xlsx")
+gold_df <- gold_raw %>% dplyr::select(MRN, Set, `Overall Rating`) %>% distinct()
+gold_df <- gold_df %>% rename(mrn = MRN)
+
+gold_df <- gold_df %>%
+  dplyr::mutate(
+    truth_label = dplyr::case_when(
+      `Overall Rating` == "A" ~ "Appropriate",
+      `Overall Rating` == "M" ~ "May Be Appropriate",
+      `Overall Rating` == "R" ~ "Rarely Appropriate",
+      TRUE ~ NA_character_
+    )
+  )
+
+gold_test <- gold_df %>% filter(is.na(Set))
+
 
 # Temp code to add random outcome labels
-analysis_df <- left_join(final_model_scores, gold_val, by = "mrn")
+analysis_df <- inner_join(final_model_scores, gold_test, by = "mrn")
+analysis_df <- analysis_df %>% filter(!is.na(truth_label))
+
+analysis_store <- analysis_df %>% dplyr::select(mrn, visitdate, auc_category, applicable_auc_criteria, rationale,
+                                                supporting_phrases, confidence_score, truth_label) %>% distinct()
+
+write.csv(x = analysis_store, file = "/phi/sbi/chest_pain/analysis_df.csv")
+
 
 # Now perform analysis using the ground truth label #
 
@@ -542,7 +533,7 @@ overall_accuracy_ci <- stats::binom.test(
   n = n_eval
 )$conf.int
 
-accuracy_results_03 <- tibble::tibble(
+accuracy_results <- tibble::tibble(
   n = n_eval,
   correct = sum(eval_df$exact_match),
   accuracy = overall_accuracy,
@@ -550,9 +541,11 @@ accuracy_results_03 <- tibble::tibble(
   accuracy_ci_upper = overall_accuracy_ci[2]
 )
 
-accuracy_results_01 #80%
-accuracy_results_02 #90%
-accuracy_results_03 #90%
+accuracy_results
+
+# accuracy_results_01 #85%
+# accuracy_results_02 #90%
+# accuracy_results_03 #90%
 
 ### -------------------------------- ###
 ### 4) Weighted Cohen's kappa        ###
@@ -560,6 +553,10 @@ accuracy_results_03 #90%
 ### -------------------------------- ###
 
 quadratic_weighted_kappa <- function(truth, pred, levels) {
+  keep <- stats::complete.cases(truth, pred)
+  truth <- truth[keep]
+  pred  <- pred[keep]
+
   truth_f <- factor(truth, levels = levels, ordered = TRUE)
   pred_f  <- factor(pred,  levels = levels, ordered = TRUE)
 
@@ -590,18 +587,75 @@ quadratic_weighted_kappa <- function(truth, pred, levels) {
   )
 }
 
+bootstrap_weighted_kappa_ci <- function(truth, pred, levels, n_boot = 2000, conf_level = 0.95,
+                                        seed = 123) {
+  keep <- stats::complete.cases(truth, pred)
+  truth <- truth[keep]
+  pred  <- pred[keep]
+
+  n <- length(truth)
+
+  if (n == 0) {
+    stop("No complete cases available for truth and pred.")
+  }
+
+  point_estimate <- quadratic_weighted_kappa(
+    truth = truth,
+    pred = pred,
+    levels = levels
+  )$weighted_kappa
+
+  set.seed(seed)
+
+  boot_vals <- replicate(n_boot, {
+    idx <- sample.int(n, size = n, replace = TRUE)
+
+    quadratic_weighted_kappa(
+      truth = truth[idx],
+      pred = pred[idx],
+      levels = levels
+    )$weighted_kappa
+  })
+
+  alpha <- 1 - conf_level
+  ci <- stats::quantile(
+    boot_vals,
+    probs = c(alpha / 2, 1 - alpha / 2),
+    na.rm = TRUE,
+    names = FALSE
+  )
+
+  list(
+    weighted_kappa = point_estimate,
+    ci_lower = ci[1],
+    ci_upper = ci[2],
+    boot_vals = boot_vals
+  )
+}
+
 kappa_out <- quadratic_weighted_kappa(
   truth = eval_df$truth_label,
   pred  = eval_df$auc_category,
   levels = ordered_levels
 )
 
-weighted_kappa <- kappa_out$weighted_kappa
+kappa_ci_out <- bootstrap_weighted_kappa_ci(
+  truth = eval_df$truth_label,
+  pred  = eval_df$auc_category,
+  levels = ordered_levels,
+  n_boot = 2000,
+  conf_level = 0.95,
+  seed = 123
+)
 
 kappa_results <- tibble::tibble(
   metric = "Quadratic weighted Cohen's kappa",
-  value = weighted_kappa
+  value = kappa_ci_out$weighted_kappa,
+  ci_lower = kappa_ci_out$ci_lower,
+  ci_upper = kappa_ci_out$ci_upper
 )
+
+kappa_results
 
 ### ---------------------------------------------- ###
 ### 5) Exact / adjacent / extreme disagreement     ###
@@ -631,6 +685,8 @@ disagreement_summary <- eval_df %>%
       )
     )
   )
+
+disagreement_summary
 
 ### ------------------------------------------------------------- ###
 ### 6) Per-class sensitivity, specificity, PPV, NPV, precision,  ###
@@ -702,6 +758,8 @@ per_class_metrics_with_macro <- dplyr::bind_rows(
   macro_metrics
 )
 
+per_class_metrics_with_macro
+
 ### -------------------------------- ###
 ### 7) Direction of disagreement     ###
 ### -------------------------------- ###
@@ -727,6 +785,8 @@ direction_summary_all <- tibble::tibble(
     prop_all_cases = n / sum(n)
   )
 
+direction_summary_all
+
 direction_summary_errors_only <- eval_df %>%
   dplyr::filter(signed_diff != 0) %>%
   dplyr::summarise(
@@ -739,6 +799,8 @@ direction_summary_errors_only <- eval_df %>%
     prop_more_permissive_among_errors = safe_divide(n_more_permissive, n_errors)
   )
 
+direction_summary_errors_only
+
 direction_by_magnitude <- eval_df %>%
   dplyr::filter(signed_diff != 0) %>%
   dplyr::mutate(
@@ -747,6 +809,8 @@ direction_by_magnitude <- eval_df %>%
   ) %>%
   dplyr::count(direction, magnitude, name = "n") %>%
   dplyr::mutate(prop = n / sum(n))
+
+direction_by_magnitude
 
 ### ---------------------------------------------- ###
 ### 8) Exploratory confidence-score analysis       ###
@@ -843,6 +907,8 @@ if (
 } else {
   spearman_results <- NULL
 }
+
+spearman_results
 
 ### -------------------------------- ###
 ### 9) Optional: collect all outputs ###
@@ -1072,7 +1138,8 @@ p_confidence_accuracy <- ggplot(
   ) +
   geom_text(
     aes(label = n_label),
-    vjust = -1,
+    vjust = +1,
+    hjust = -0.5,
     size = 4,
     fontface = "bold"
   ) +
