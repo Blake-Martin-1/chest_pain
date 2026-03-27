@@ -169,123 +169,15 @@ auc_json_schema <- function() {
 # -------------------------------
 # Load data
 # -------------------------------
-prompt_text <- "You are a clinical reasoning assistant with expertise in pediatric cardiology. Your task is to read outpatient clinical notes from pediatric cardiology visits for patients whose chief complaint is chest pain. Using the information in the note, determine whether an echocardiogram is Appropriate, May Be Appropriate, or Rarely Appropriate based on the 2014 Appropriate Use Criteria (AUC) for Initial Transthoracic Echocardiography in Outpatient Pediatric Cardiology.
 
-You should identify key symptoms, family history elements, physical exam findings, vital signs, and ECG findings when present.
+# ### Code to store current version of prompt during training process ###
+# writeLines(
+#   prompt_text,
+#   con = "/phi/sbi/chest_pain/cp_github_files/prompt_v03.txt",
+#   useBytes = TRUE
+# )
 
-DECISION RULES
-
-Use the most conservative applicable category.
-- Choose Appropriate if any Appropriate criteria are present.
-- Choose May Be Appropriate only if no Appropriate criteria apply.
-- Choose Rarely Appropriate only if no Appropriate or May Be Appropriate criteria apply.
-
-AUC CATEGORIES:
-
-Appropriate
-Choose Appropriate if any of the following AUC criteria are present:
-
-1. Exertional chest pain
-Any chest pain occurring or worse during physical exertion, even if it occurred only once or has resolved. In order to classify under this criteria, it must be the chest pain that is exertional and not a different symptom (e.g. shortness of breath).
-
-2. Non-exertional chest pain with abnormal ECG
-ECG rules
-- If ECG interpretation says 'abnormal' or 'borderline', classify as abnormal regardless of specific findings.
-- If ECG interpretation says 'normal' or 'otherwise normal', classify as normal.
-- If the HPI describes a previous abnormal ECG, count it as abnormal even if the ECG summary from that visit is normal.
-- If a previous ECG was inconclusive, but the current ECG is normal, treat the ECG as normal.
-
-3. Chest pain with family history of sudden unexplained death or cardiomyopathy
-Definitions
-- Sudden unexplained death: death without a known cause under age 50
-Family history may include:
-- Parents
-- Siblings
-- Grandparents
-- Aunts or uncles
-
-May Be Appropriate
-Choose May Be Appropriate only if no Appropriate criteria apply and one of the following AUC criteria is present.
-
-1. Chest pain with other symptoms or signs of cardiovascular disease, a benign family history, and a normal ECG
-Symptoms or signs of cardiovascular disease
-Symptoms:
-- Palpitations
-- 'Heart racing' or similar (assume this refers to palpitations unless explicitly denied)
-- Syncope
-- Exertional presyncope / dizziness / lightheadedness
-- Shortness of breath or dyspnea not explained by another condition (e.g., asthma)
-
-Physical exam findings:
-- Cardiac murmur
-- Any abnormal cardiac exam finding documented in the physical exam
-
-Benign family history means none of the following:
-- Sudden unexplained death
-- Cardiomyopathy
-- Premature coronary artery disease
-
-2. Chest pain with family history of premature coronary artery disease
-Define premature coronary artery disease as:
-- Myocardial infarction
-- Coronary stent
-- Coronary artery bypass grafting
-- Any coronary artery disease occurring before age 50 in any family member.
-
-3. Chest pain with recent onset of fever
-Definition: Fever >= 38.0 C (100.4 F) within the last two weeks
-
-4. Chest pain with recent illicit drug use
-Definition: Illicit drug use within the past two weeks
-For this study:
-- Marijuana counts as illicit drug use
-
-Rarely Appropriate
-Classify as Rarely Appropriate only if no Appropriate or May Be Appropriate criteria are present. Relevant Rarely Appropriate patterns include:
-1. Chest pain with no other symptoms or signs of cardiovascular disease, benign family history, and normal ECG
-2. Non-exertional chest pain with no recent ECG
-3. Non-exertional chest pain with normal ECG
-4. Reproducible chest pain with palpation or deep inspiration
-
-ADDITIONAL CLARIFICATIONS
-
-Symptoms considered cardiovascular symptoms
-- Palpitations
-- 'Heart racing'
-- Syncope
-- Exertional dizziness / presyncope
-- Dyspnea not explained by another condition
-
-Abnormal cardiovascular exam examples
-- Murmur
-- Gallop
-- Hepatomegaly
-- Rales
-- Peripheral edema
-- Any abnormal cardiac exam finding
-
-OUTPUT INSTRUCTIONS
-
-Return your answer only in the structured JSON format requested by the schema.
-
-Field requirements:
-- patient_id: copy the patient CSN exactly as provided in the input.
-- auc_category: must be exactly one of 'Appropriate', 'May Be Appropriate', or 'Rarely Appropriate'.
-- applicable_auc_criteria: Specify all AUC criteria that were applicable to this note. Include all A criteria, M criteria, and R criteria that apply to the note (e.g., A1 – Exertional chest pain, M1 – Chest pain with other cardiovascular symptoms, R4 – Reproducible chest pain with palpation).
-- rationale: 1 to 2 sentences explaining the classification and explicitly referencing the applicable AUC criterion or criteria.
-- supporting_phrases: an array of direct quotes copied verbatim from the clinical note that support the chosen auc category.
-- confidence_score: an integer from 1 = Low confidence, 2 = Some uncertainty, 3 = Moderate confidence, 4 = High confidence,and 5 = Complete confidence
-
-Do not return pipe-separated text, CSV-style rows, markdown, or any extra keys."
-
-### Code to store current version of prompt ###
-writeLines(
-  prompt_text,
-  con = "/phi/sbi/chest_pain/cp_github_files/prompt_v03.txt",
-  useBytes = TRUE
-)
-
-prompt_text <- paste(readLines("prompt_v01.txt"), collapse = "\n")
+prompt_text <- paste(readLines("prompt_v03.txt"), collapse = "\n")
 
 
 df_full <- readr::read_csv(excel_path, show_col_types = FALSE)
@@ -313,7 +205,49 @@ df_full <- df_full %>% left_join(dates_raw %>% dplyr::select(csn, visitdate), by
 df_full <- df_full %>% arrange(visitdate)
 
 
-df <- df_full %>% filter(mrn %in% list_of_ids) # 1:20 training set, 21:42 validation, 42:130
+df <- df_full %>% filter(!(mrn %in% c(
+  1855606,
+  1136910,
+  2268768,
+  1403175,
+  2742543,
+  2220008,
+  1184812,
+  2612251,
+  1832936,
+  1079443,
+  1204989,
+  1811029,
+  2780649,
+  2219061,
+  2784554,
+  1734913,
+  1165444,
+  2018427,
+  1824004,
+  1244746,
+  1973431, #end of training
+  2126321, # start of validation
+  1929390,
+  1838794,
+  2776984,
+  1418906,
+  1192161,
+  1342715,
+  2795294,
+  2019100,
+  2796297,
+  1452091,
+  1591829,
+  1902018,
+  1629399,
+  1455106,
+  2077368,
+  2799363,
+  1241864,
+  2238211,
+  1572368))
+  ) # 1:20 training set, 22:41 validation, 42:130
 
 
 required_cols <- c("csn", "mrn", "visitage", "sex", "chiefcomp", "visitdiagnc", "ecg_yn", "ecg_summary", "extracted_note")
@@ -500,28 +434,53 @@ dates_df$patient_id <- as.character(dates_df$patient_id)
 final_model_scores <- parsed_results %>% left_join(dates_df %>% dplyr::select(patient_id, visitdate), by = "patient_id")
 final_model_scores <- final_model_scores %>% relocate(patient_id, returned_patient_id, custom_id, visitdate)
 
-View(final_model_scores %>% dplyr::select(patient_id, returned_patient_id, visitdate, auc_category, applicable_auc_criteria, rationale,
-                                          supporting_phrases, confidence_score) %>% arrange(visitdate))
+ids <- df_full %>% dplyr::select(mrn, csn) %>% distinct()
+ids$csn <- as.character(ids$csn)
 
-ids <- df %>% dplyr::select(mrn, csn) %>% mutate(csn = as.character(csn))
 final_model_scores <- final_model_scores %>% left_join(ids %>% rename(patient_id = csn))
+final_model_scores <- final_model_scores %>% relocate(mrn)
+
+final_model_scores_01 <- final_model_scores <- final_model_scores %>% relocate(mrn)
+final_model_scores_02 <- final_model_scores <- final_model_scores %>% relocate(mrn)
+final_model_scores_03 <- final_model_scores <- final_model_scores %>% relocate(mrn)
+
+# Add on gold standard labels
+gold_val <- data.frame(mrn = c(
+                       2126321,
+                       1929390,
+                       1838794,
+                       2776984,
+                       1418906,
+                       1192161,
+                       1342715,
+                       2795294,
+                       2019100,
+                       2796297,
+                       1452091,
+                       1591829,
+                       1902018,
+                       1629399,
+                       1455106,
+                       2077368,
+                       2799363,
+                       1241864,
+                       2238211,
+                       1572368), truth_label = c(
+  "Appropriate",
+  "Rarely Appropriate",
+  "Rarely Appropriate",
+  "Rarely Appropriate", "Appropriate", "Appropriate", "Rarely Appropriate", "Appropriate", "Appropriate",
+  "Appropriate", "Appropriate", "May Be Appropriate", "May Be Appropriate", "Appropriate", "Appropriate",
+  "Appropriate", "Rarely Appropriate", "May Be Appropriate", "Rarely Appropriate", "Appropriate"
+))
+
 
 
 # Load in gold standard labels
 # gold <- read_xls(path = "/phi/sbi/chest_pain/gold_labels.xlsx")
 
 # Temp code to add random outcome labels
-set.seed(123)  # optional, for reproducibility
-gold_temp <- data.frame(
-  truth_label = sample(
-    x = c("Appropriate", "May Be Appropriate", "Rarely Appropriate"),
-    size = nrow(final_model_scores),
-    replace = TRUE
-  ),
-  stringsAsFactors = FALSE
-)
-
-analysis_df <- bind_cols(final_model_scores, gold_temp)
+analysis_df <- left_join(final_model_scores, gold_val, by = "mrn")
 
 # Now perform analysis using the ground truth label #
 
@@ -583,13 +542,17 @@ overall_accuracy_ci <- stats::binom.test(
   n = n_eval
 )$conf.int
 
-accuracy_results <- tibble::tibble(
+accuracy_results_03 <- tibble::tibble(
   n = n_eval,
   correct = sum(eval_df$exact_match),
   accuracy = overall_accuracy,
   accuracy_ci_lower = overall_accuracy_ci[1],
   accuracy_ci_upper = overall_accuracy_ci[2]
 )
+
+accuracy_results_01 #80%
+accuracy_results_02 #90%
+accuracy_results_03 #90%
 
 ### -------------------------------- ###
 ### 4) Weighted Cohen's kappa        ###
