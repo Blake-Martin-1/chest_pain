@@ -998,7 +998,7 @@ p_confusion_heatmap <- ggplot(
   labs(
     title = "Confusion Matrix",
     subtitle = "Cell labels show count and row percentage",
-    x = "LLM prediction",
+    x = "LLM Prediction",
     y = "SME truth label"
   ) +
   plot_theme_auc
@@ -1267,110 +1267,6 @@ p_ordinal_agreement <- ggplot(
 p_ordinal_agreement
 
 
-### ------------------------------------------------------------- ###
-### 12) Sankey / alluvial plot                                    ###
-###      Flow from SME truth label to LLM prediction              ###
-### ------------------------------------------------------------- ###
-
-if (!requireNamespace("ggalluvial", quietly = TRUE)) {
-  stop(
-    "The package 'ggalluvial' is needed for the Sankey/alluvial plot. ",
-    "Install it with: install.packages('ggalluvial')"
-  )
-}
-
-agreement_palette <- c(
-  "Exact agreement" = "blue",      # light blue-green / teal
-  "Adjacent disagreement" = "purple", # yellow
-  "Extreme disagreement" = "#E31A1C",  # red
-  "Other" = "gray70"
-)
-
-alluvial_plot_df <- eval_df %>%
-  dplyr::mutate(
-    agreement_type = dplyr::case_when(
-      abs_diff == 0 ~ "Exact agreement",
-      abs_diff == 1 ~ "Adjacent disagreement",
-      abs_diff == 2 ~ "Extreme disagreement",
-      TRUE ~ "Other"
-    ),
-    agreement_type = factor(
-      agreement_type,
-      levels = c(
-        "Exact agreement",
-        "Adjacent disagreement",
-        "Extreme disagreement",
-        "Other"
-      )
-    ),
-    truth_label = factor(
-      truth_label,
-      levels = ordered_levels,
-      ordered = TRUE
-    ),
-    auc_category = factor(
-      auc_category,
-      levels = ordered_levels,
-      ordered = TRUE
-    )
-  ) %>%
-  dplyr::count(truth_label, auc_category, agreement_type, name = "n") %>%
-  dplyr::filter(n > 0)
-
-p_sankey_alluvial <- ggplot2::ggplot(
-  alluvial_plot_df,
-  ggplot2::aes(
-    y = n,
-    axis1 = truth_label,
-    axis2 = auc_category
-  )
-) +
-  ggalluvial::geom_alluvium(
-    ggplot2::aes(fill = agreement_type),
-    width = 1 / 10,
-    alpha = 0.82,
-    color = "grey",
-    linewidth = 0.35
-  ) +
-  ggalluvial::geom_stratum(
-    width = 1 / 4,
-    fill = "gray95",
-    color = "gray45",
-    linewidth = 0.7
-  ) +
-  ggalluvial::stat_stratum(
-    geom = "text",
-    ggplot2::aes(label = ggplot2::after_stat(stratum)),
-    size = 4,
-    fontface = "bold",
-    lineheight = 0.9
-  ) +
-  ggplot2::scale_x_discrete(
-    limits = c("SME truth label", "LLM prediction"),
-    expand = c(0.13, 0.05)
-  ) +
-  ggplot2::scale_fill_manual(
-    values = agreement_palette,
-    drop = FALSE
-  ) +
-  ggplot2::labs(
-    title = "Flow of Expert AUC Classifications to LLM Predictions",
-    subtitle = agreement_subtitle,
-    x = NULL,
-    y = "Number of clinic notes",
-    fill = NULL
-  ) +
-  plot_theme_auc +
-  ggplot2::theme(
-    legend.position = "bottom",
-    axis.text.y = ggplot2::element_blank(),
-    axis.ticks.y = ggplot2::element_blank(),
-    axis.title.y = ggplot2::element_blank(),
-    panel.grid = ggplot2::element_blank()
-  )
-
-p_sankey_alluvial
-
 
 #### Another alluvial plot option
 ### ------------------------------------------------------------- ###
@@ -1387,50 +1283,112 @@ if (!requireNamespace("ggforce", quietly = TRUE)) {
 }
 
 agreement_palette <- c(
-  "Exact agreement" = "#8DD3C7",       # light blue-green
-  "Adjacent disagreement" = "#FFD92F", # yellow
+  "Exact agreement" = "#1B9E77",       # green
+  "Adjacent agreement" = "#FFD92F",    # yellow
   "Extreme disagreement" = "#E31A1C",  # red
   "Other" = "gray70"
 )
 
-# Rebuild subtitle with 5 spaces between items and capitalized starts
+# Rebuild subtitle with exact, adjacent, and extreme disagreement
 agreement_summary_for_plot <- eval_df %>%
   dplyr::summarise(
     n_eval = dplyr::n(),
     exact_n = sum(abs_diff == 0),
     adjacent_n = sum(abs_diff == 1),
     extreme_n = sum(abs_diff == 2),
-    exact_or_adjacent_n = sum(abs_diff <= 1)
+    .groups = "drop"
+  ) %>%
+  dplyr::mutate(
+    exact_pct = exact_n / n_eval,
+    adjacent_pct = adjacent_n / n_eval,
+    extreme_pct = extreme_n / n_eval
   )
 
 agreement_subtitle <- paste0(
   "Exact agreement: ",
   agreement_summary_for_plot$exact_n, "/", agreement_summary_for_plot$n_eval,
-  " (", scales::percent(agreement_summary_for_plot$exact_n / agreement_summary_for_plot$n_eval, accuracy = 1), ")",
+  " (", scales::percent(agreement_summary_for_plot$exact_pct, accuracy = 1), ")",
   "     ",
-  "Exact or adjacent: ",
-  agreement_summary_for_plot$exact_or_adjacent_n, "/", agreement_summary_for_plot$n_eval,
-  " (", scales::percent(agreement_summary_for_plot$exact_or_adjacent_n / agreement_summary_for_plot$n_eval, accuracy = 1), ")",
+  "Adjacent agreement: ",
+  agreement_summary_for_plot$adjacent_n, "/", agreement_summary_for_plot$n_eval,
+  " (", scales::percent(agreement_summary_for_plot$adjacent_pct, accuracy = 1), ")",
   "     ",
   "Extreme disagreement: ",
   agreement_summary_for_plot$extreme_n, "/", agreement_summary_for_plot$n_eval,
-  " (", scales::percent(agreement_summary_for_plot$extreme_n / agreement_summary_for_plot$n_eval, accuracy = 1), ")"
+  " (", scales::percent(agreement_summary_for_plot$extreme_pct, accuracy = 1), ")"
 )
 
-# Display labels for boxes: wrap long category names onto 2 lines
-display_level_map <- c(
+# Base display labels
+display_level_base_map <- c(
   "Rarely Appropriate" = "Rarely\nAppropriate",
   "May Be Appropriate" = "May Be\nAppropriate",
   "Appropriate" = "Appropriate"
 )
 
-display_levels <- unname(display_level_map)
+# Counts for LEFT side: LLM predictions
+llm_count_labels <- eval_df %>%
+  dplyr::count(auc_category, name = "n") %>%
+  tidyr::complete(
+    auc_category = factor(ordered_levels, levels = ordered_levels, ordered = TRUE),
+    fill = list(n = 0)
+  ) %>%
+  dplyr::mutate(
+    category_chr = as.character(auc_category),
+    display_label = paste0(
+      display_level_base_map[category_chr],
+      "\n",
+      "(n = ", n, ")"
+    )
+  ) %>%
+  dplyr::select(category_chr, display_label)
+
+llm_display_map <- stats::setNames(
+  llm_count_labels$display_label,
+  llm_count_labels$category_chr
+)
+
+llm_display_levels <- unname(llm_display_map[ordered_levels])
+
+
+# Counts for RIGHT side: expert classifications
+expert_count_labels <- eval_df %>%
+  dplyr::count(truth_label, name = "n") %>%
+  tidyr::complete(
+    truth_label = factor(ordered_levels, levels = ordered_levels, ordered = TRUE),
+    fill = list(n = 0)
+  ) %>%
+  dplyr::mutate(
+    category_chr = as.character(truth_label),
+    display_label = paste0(
+      display_level_base_map[category_chr],
+      "\n",
+      "(n = ", n, ")"
+    )
+  ) %>%
+  dplyr::select(category_chr, display_label)
+
+expert_display_map <- stats::setNames(
+  expert_count_labels$display_label,
+  expert_count_labels$category_chr
+)
+
+expert_display_levels <- unname(expert_display_map[ordered_levels])
+
+
+# Important:
+# Use the same combined factor levels for both sides.
+# This preserves the Rarely -> May Be -> Appropriate vertical order,
+# while still allowing side-specific n values in the labels.
+combined_display_levels <- unique(as.vector(rbind(
+  llm_display_levels,
+  expert_display_levels
+)))
 
 parallel_sets_wide <- eval_df %>%
   dplyr::mutate(
     agreement_type = dplyr::case_when(
       abs_diff == 0 ~ "Exact agreement",
-      abs_diff == 1 ~ "Adjacent disagreement",
+      abs_diff == 1 ~ "Adjacent agreement",
       abs_diff == 2 ~ "Extreme disagreement",
       TRUE ~ "Other"
     ),
@@ -1438,22 +1396,22 @@ parallel_sets_wide <- eval_df %>%
       agreement_type,
       levels = c(
         "Exact agreement",
-        "Adjacent disagreement",
+        "Adjacent agreement",
         "Extreme disagreement",
         "Other"
       )
     ),
+
     # LEFT side = LLM prediction
     llm_label_display = factor(
-      dplyr::recode(as.character(auc_category), !!!display_level_map),
-      levels = display_levels,
-      ordered = TRUE
+      dplyr::recode(as.character(auc_category), !!!llm_display_map),
+      levels = combined_display_levels
     ),
+
     # RIGHT side = Expert classification
     expert_label_display = factor(
-      dplyr::recode(as.character(truth_label), !!!display_level_map),
-      levels = display_levels,
-      ordered = TRUE
+      dplyr::recode(as.character(truth_label), !!!expert_display_map),
+      levels = combined_display_levels
     )
   ) %>%
   dplyr::count(llm_label_display, expert_label_display, agreement_type, name = "n") %>%
@@ -1462,7 +1420,18 @@ parallel_sets_wide <- eval_df %>%
 parallel_sets_long <- ggforce::gather_set_data(
   parallel_sets_wide,
   x = c("llm_label_display", "expert_label_display")
-)
+) %>%
+  dplyr::mutate(
+    agreement_type = factor(
+      agreement_type,
+      levels = c(
+        "Exact agreement",
+        "Adjacent agreement",
+        "Extreme disagreement",
+        "Other"
+      )
+    )
+  )
 
 p_parallel_sets <- ggplot2::ggplot(
   parallel_sets_long,
@@ -1488,9 +1457,9 @@ p_parallel_sets <- ggplot2::ggplot(
   ) +
   ggforce::geom_parallel_sets_labels(
     color = "gray20",
-    size = 3.3,         # slightly smaller label text
+    size = 2.7,
     fontface = "bold",
-    lineheight = 0.9
+    lineheight = 0.82
   ) +
   ggplot2::scale_x_discrete(
     labels = c(
@@ -1503,22 +1472,41 @@ p_parallel_sets <- ggplot2::ggplot(
     values = agreement_palette,
     breaks = c(
       "Exact agreement",
-      "Adjacent disagreement",
+      "Adjacent agreement",
       "Extreme disagreement"
     ),
     drop = TRUE
   ) +
   ggplot2::labs(
-    title = "Flow of Expert AUC Classifications to LLM Predictions",
+    title = "Agreement Between Expert and LLM AUC Classifications",
     subtitle = agreement_subtitle,
     x = NULL,
-    y = "Number of clinic notes",
+    y = NULL,
     fill = NULL
+  ) +
+  ggplot2::annotate(
+    "text",
+    x = 1,
+    y = Inf,
+    label = "LLM Prediction",
+    vjust = 1.6,
+    fontface = "bold",
+    size = 5
+  ) +
+  ggplot2::annotate(
+    "text",
+    x = 2,
+    y = Inf,
+    label = "Expert Classification",
+    vjust = 1.6,
+    fontface = "bold",
+    size = 5
   ) +
   plot_theme_auc +
   ggplot2::theme(
     legend.position = "bottom",
     panel.grid = ggplot2::element_blank(),
+    axis.title.y = ggplot2::element_blank(),
     axis.text.y = ggplot2::element_blank(),
     axis.ticks.y = ggplot2::element_blank(),
     axis.text.x = ggplot2::element_text(
