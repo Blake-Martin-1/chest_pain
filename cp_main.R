@@ -290,6 +290,8 @@ requests_tbl <- df |>
     )
   )
 
+
+
 # -------------------------------
 # Write JSONL file for batch submission
 # -------------------------------
@@ -444,33 +446,37 @@ final_model_scores <- final_model_scores %>% relocate(mrn)
 # final_model_scores_02 <- final_model_scores <- final_model_scores %>% relocate(mrn)
 # final_model_scores_03 <- final_model_scores <- final_model_scores %>% relocate(mrn)
 
-# Add on gold standard labels
-# Load in gold standard labels
-gold_raw <- readxl::read_xlsx(path = "/phi/sbi/chest_pain/gold_labels_cp.xlsx")
-gold_df <- gold_raw %>% dplyr::select(MRN, Set, `Overall Rating`) %>% distinct()
-gold_df <- gold_df %>% rename(mrn = MRN)
+# # Add on gold standard labels
+#
+# gold_raw <- read.csv(file = "/phi/sbi/chest_pain/cp_labels_5_18_26.csv")
+# gold_df <- gold_raw %>% dplyr::select(MRN, Set, `Overall.Rating`) %>% distinct()
+# gold_df <- gold_df %>% rename(mrn = MRN,"Overall Rating" = Overall.Rating)
+#
+# gold_df <- gold_df %>%
+#   dplyr::mutate(
+#     truth_label = dplyr::case_when(
+#       `Overall Rating` == "A" ~ "Appropriate",
+#       `Overall Rating` == "M" ~ "May Be Appropriate",
+#       `Overall Rating` == "R" ~ "Rarely Appropriate",
+#       TRUE ~ NA_character_
+#     )
+#   )
+#
+# gold_test <- gold_df %>% filter(Set == "")
+# gold_test <- gold_test %>% filter(!is.na(truth_label))
+#
+#
+# # Temp code to add random outcome labels
+# analysis_df <- inner_join(final_model_scores, gold_test, by = "mrn")
+# analysis_df <- analysis_df %>% filter(!is.na(truth_label))
+#
+# analysis_store <- analysis_df %>% dplyr::select(mrn, visitdate, auc_category, applicable_auc_criteria, rationale,
+#                                                 supporting_phrases, confidence_score, truth_label) %>% distinct()
+#
+# write.csv(x = analysis_store, file = "/phi/sbi/chest_pain/analysis_df_5_18_26.csv")
+analysis_df <- read.csv(file = "/phi/sbi/chest_pain/analysis_df_5_18_26.csv")
 
-gold_df <- gold_df %>%
-  dplyr::mutate(
-    truth_label = dplyr::case_when(
-      `Overall Rating` == "A" ~ "Appropriate",
-      `Overall Rating` == "M" ~ "May Be Appropriate",
-      `Overall Rating` == "R" ~ "Rarely Appropriate",
-      TRUE ~ NA_character_
-    )
-  )
 
-gold_test <- gold_df %>% filter(is.na(Set))
-
-
-# Temp code to add random outcome labels
-analysis_df <- inner_join(final_model_scores, gold_test, by = "mrn")
-analysis_df <- analysis_df %>% filter(!is.na(truth_label))
-
-analysis_store <- analysis_df %>% dplyr::select(mrn, visitdate, auc_category, applicable_auc_criteria, rationale,
-                                                supporting_phrases, confidence_score, truth_label) %>% distinct()
-
-write.csv(x = analysis_store, file = "/phi/sbi/chest_pain/analysis_df.csv")
 
 
 # Now perform analysis using the ground truth label #
@@ -1158,3 +1164,368 @@ p_confidence_accuracy <- ggplot(
 
 p_confidence_accuracy
 
+
+
+### ------------------------------------------------------------- ###
+### 11) Stacked ordinal agreement plot                            ###
+###      LLM prediction distribution within each SME truth label   ###
+### ------------------------------------------------------------- ###
+
+agreement_summary_for_plot <- eval_df %>%
+  dplyr::summarise(
+    n_eval = dplyr::n(),
+    exact_n = sum(abs_diff == 0),
+    adjacent_n = sum(abs_diff == 1),
+    extreme_n = sum(abs_diff == 2),
+    exact_or_adjacent_n = sum(abs_diff <= 1)
+  ) %>%
+  dplyr::mutate(
+    exact_pct = exact_n / n_eval,
+    exact_or_adjacent_pct = exact_or_adjacent_n / n_eval,
+    extreme_pct = extreme_n / n_eval,
+    subtitle = paste0(
+      "Exact agreement: ", exact_n, "/", n_eval, " (",
+      scales::percent(exact_pct, accuracy = 1), "); ",
+      "exact or adjacent: ", exact_or_adjacent_n, "/", n_eval, " (",
+      scales::percent(exact_or_adjacent_pct, accuracy = 1), "); ",
+      "extreme disagreement: ", extreme_n, "/", n_eval, " (",
+      scales::percent(extreme_pct, accuracy = 1), ")"
+    )
+  )
+
+agreement_subtitle <- agreement_summary_for_plot$subtitle[1]
+
+prediction_palette <- c(
+  "Rarely Appropriate" = "#4575b4",
+  "May Be Appropriate" = "#fdae61",
+  "Appropriate" = "#1a9850"
+)
+
+ordinal_agreement_df <- eval_df %>%
+  dplyr::count(truth_label, auc_category, name = "n") %>%
+  tidyr::complete(
+    truth_label = factor(ordered_levels, levels = ordered_levels, ordered = TRUE),
+    auc_category = factor(ordered_levels, levels = ordered_levels, ordered = TRUE),
+    fill = list(n = 0)
+  ) %>%
+  dplyr::group_by(truth_label) %>%
+  dplyr::mutate(
+    row_total = sum(n),
+    prop = n / row_total,
+    segment_label = dplyr::if_else(
+      n > 0 & prop >= 0.06,
+      paste0(n, "\n(", scales::percent(prop, accuracy = 1), ")"),
+      ""
+    )
+  ) %>%
+  dplyr::ungroup()
+
+p_ordinal_agreement <- ggplot(
+  ordinal_agreement_df,
+  aes(
+    y = truth_label,
+    x = prop,
+    fill = auc_category
+  )
+) +
+  geom_col(
+    width = 0.72,
+    color = "white",
+    linewidth = 0.6,
+    position = ggplot2::position_stack(reverse = TRUE)
+  ) +
+  geom_text(
+    aes(label = segment_label),
+    position = ggplot2::position_stack(vjust = 0.5, reverse = TRUE),
+    size = 4,
+    fontface = "bold",
+    lineheight = 0.9
+  ) +
+  scale_x_continuous(
+    labels = scales::percent_format(accuracy = 1),
+    limits = c(0, 1),
+    expand = ggplot2::expansion(mult = c(0, 0.01))
+  ) +
+  scale_fill_manual(
+    values = prediction_palette,
+    breaks = ordered_levels,
+    drop = FALSE
+  ) +
+  labs(
+    title = "LLM Echocardiography Appropriateness Ratings by Expert Classification",
+    subtitle = agreement_subtitle,
+    x = "Percent of cases within SME truth label",
+    y = "SME truth label",
+    fill = "LLM prediction"
+  ) +
+  plot_theme_auc +
+  theme(
+    legend.position = "bottom",
+    panel.grid.major.y = element_blank()
+  )
+
+p_ordinal_agreement
+
+
+### ------------------------------------------------------------- ###
+### 12) Sankey / alluvial plot                                    ###
+###      Flow from SME truth label to LLM prediction              ###
+### ------------------------------------------------------------- ###
+
+if (!requireNamespace("ggalluvial", quietly = TRUE)) {
+  stop(
+    "The package 'ggalluvial' is needed for the Sankey/alluvial plot. ",
+    "Install it with: install.packages('ggalluvial')"
+  )
+}
+
+agreement_palette <- c(
+  "Exact agreement" = "blue",      # light blue-green / teal
+  "Adjacent disagreement" = "purple", # yellow
+  "Extreme disagreement" = "#E31A1C",  # red
+  "Other" = "gray70"
+)
+
+alluvial_plot_df <- eval_df %>%
+  dplyr::mutate(
+    agreement_type = dplyr::case_when(
+      abs_diff == 0 ~ "Exact agreement",
+      abs_diff == 1 ~ "Adjacent disagreement",
+      abs_diff == 2 ~ "Extreme disagreement",
+      TRUE ~ "Other"
+    ),
+    agreement_type = factor(
+      agreement_type,
+      levels = c(
+        "Exact agreement",
+        "Adjacent disagreement",
+        "Extreme disagreement",
+        "Other"
+      )
+    ),
+    truth_label = factor(
+      truth_label,
+      levels = ordered_levels,
+      ordered = TRUE
+    ),
+    auc_category = factor(
+      auc_category,
+      levels = ordered_levels,
+      ordered = TRUE
+    )
+  ) %>%
+  dplyr::count(truth_label, auc_category, agreement_type, name = "n") %>%
+  dplyr::filter(n > 0)
+
+p_sankey_alluvial <- ggplot2::ggplot(
+  alluvial_plot_df,
+  ggplot2::aes(
+    y = n,
+    axis1 = truth_label,
+    axis2 = auc_category
+  )
+) +
+  ggalluvial::geom_alluvium(
+    ggplot2::aes(fill = agreement_type),
+    width = 1 / 10,
+    alpha = 0.82,
+    color = "grey",
+    linewidth = 0.35
+  ) +
+  ggalluvial::geom_stratum(
+    width = 1 / 4,
+    fill = "gray95",
+    color = "gray45",
+    linewidth = 0.7
+  ) +
+  ggalluvial::stat_stratum(
+    geom = "text",
+    ggplot2::aes(label = ggplot2::after_stat(stratum)),
+    size = 4,
+    fontface = "bold",
+    lineheight = 0.9
+  ) +
+  ggplot2::scale_x_discrete(
+    limits = c("SME truth label", "LLM prediction"),
+    expand = c(0.13, 0.05)
+  ) +
+  ggplot2::scale_fill_manual(
+    values = agreement_palette,
+    drop = FALSE
+  ) +
+  ggplot2::labs(
+    title = "Flow of Expert AUC Classifications to LLM Predictions",
+    subtitle = agreement_subtitle,
+    x = NULL,
+    y = "Number of clinic notes",
+    fill = NULL
+  ) +
+  plot_theme_auc +
+  ggplot2::theme(
+    legend.position = "bottom",
+    axis.text.y = ggplot2::element_blank(),
+    axis.ticks.y = ggplot2::element_blank(),
+    axis.title.y = ggplot2::element_blank(),
+    panel.grid = ggplot2::element_blank()
+  )
+
+p_sankey_alluvial
+
+
+#### Another alluvial plot option
+### ------------------------------------------------------------- ###
+### ------------------------------------------------------------- ###
+### 13) Alternative Sankey-style plot using ggforce parallel sets ###
+###      UPDATED VERSION                                          ###
+### ------------------------------------------------------------- ###
+
+if (!requireNamespace("ggforce", quietly = TRUE)) {
+  stop(
+    "The package 'ggforce' is needed for this plot. ",
+    "Install it with: install.packages('ggforce')"
+  )
+}
+
+agreement_palette <- c(
+  "Exact agreement" = "#8DD3C7",       # light blue-green
+  "Adjacent disagreement" = "#FFD92F", # yellow
+  "Extreme disagreement" = "#E31A1C",  # red
+  "Other" = "gray70"
+)
+
+# Rebuild subtitle with 5 spaces between items and capitalized starts
+agreement_summary_for_plot <- eval_df %>%
+  dplyr::summarise(
+    n_eval = dplyr::n(),
+    exact_n = sum(abs_diff == 0),
+    adjacent_n = sum(abs_diff == 1),
+    extreme_n = sum(abs_diff == 2),
+    exact_or_adjacent_n = sum(abs_diff <= 1)
+  )
+
+agreement_subtitle <- paste0(
+  "Exact agreement: ",
+  agreement_summary_for_plot$exact_n, "/", agreement_summary_for_plot$n_eval,
+  " (", scales::percent(agreement_summary_for_plot$exact_n / agreement_summary_for_plot$n_eval, accuracy = 1), ")",
+  "     ",
+  "Exact or adjacent: ",
+  agreement_summary_for_plot$exact_or_adjacent_n, "/", agreement_summary_for_plot$n_eval,
+  " (", scales::percent(agreement_summary_for_plot$exact_or_adjacent_n / agreement_summary_for_plot$n_eval, accuracy = 1), ")",
+  "     ",
+  "Extreme disagreement: ",
+  agreement_summary_for_plot$extreme_n, "/", agreement_summary_for_plot$n_eval,
+  " (", scales::percent(agreement_summary_for_plot$extreme_n / agreement_summary_for_plot$n_eval, accuracy = 1), ")"
+)
+
+# Display labels for boxes: wrap long category names onto 2 lines
+display_level_map <- c(
+  "Rarely Appropriate" = "Rarely\nAppropriate",
+  "May Be Appropriate" = "May Be\nAppropriate",
+  "Appropriate" = "Appropriate"
+)
+
+display_levels <- unname(display_level_map)
+
+parallel_sets_wide <- eval_df %>%
+  dplyr::mutate(
+    agreement_type = dplyr::case_when(
+      abs_diff == 0 ~ "Exact agreement",
+      abs_diff == 1 ~ "Adjacent disagreement",
+      abs_diff == 2 ~ "Extreme disagreement",
+      TRUE ~ "Other"
+    ),
+    agreement_type = factor(
+      agreement_type,
+      levels = c(
+        "Exact agreement",
+        "Adjacent disagreement",
+        "Extreme disagreement",
+        "Other"
+      )
+    ),
+    # LEFT side = LLM prediction
+    llm_label_display = factor(
+      dplyr::recode(as.character(auc_category), !!!display_level_map),
+      levels = display_levels,
+      ordered = TRUE
+    ),
+    # RIGHT side = Expert classification
+    expert_label_display = factor(
+      dplyr::recode(as.character(truth_label), !!!display_level_map),
+      levels = display_levels,
+      ordered = TRUE
+    )
+  ) %>%
+  dplyr::count(llm_label_display, expert_label_display, agreement_type, name = "n") %>%
+  dplyr::filter(n > 0)
+
+parallel_sets_long <- ggforce::gather_set_data(
+  parallel_sets_wide,
+  x = c("llm_label_display", "expert_label_display")
+)
+
+p_parallel_sets <- ggplot2::ggplot(
+  parallel_sets_long,
+  ggplot2::aes(
+    x = x,
+    id = id,
+    split = y,
+    value = n
+  )
+) +
+  ggforce::geom_parallel_sets(
+    ggplot2::aes(fill = agreement_type),
+    alpha = 0.78,
+    axis.width = 0.14,
+    color = "white",
+    linewidth = 0.25
+  ) +
+  ggforce::geom_parallel_sets_axes(
+    axis.width = 0.14,
+    fill = "gray95",
+    color = "gray45",
+    linewidth = 0.6
+  ) +
+  ggforce::geom_parallel_sets_labels(
+    color = "gray20",
+    size = 3.3,         # slightly smaller label text
+    fontface = "bold",
+    lineheight = 0.9
+  ) +
+  ggplot2::scale_x_discrete(
+    labels = c(
+      llm_label_display = "LLM prediction",
+      expert_label_display = "Expert AUC classification"
+    ),
+    expand = c(0.18, 0.08)
+  ) +
+  ggplot2::scale_fill_manual(
+    values = agreement_palette,
+    breaks = c(
+      "Exact agreement",
+      "Adjacent disagreement",
+      "Extreme disagreement"
+    ),
+    drop = TRUE
+  ) +
+  ggplot2::labs(
+    title = "Flow of Expert AUC Classifications to LLM Predictions",
+    subtitle = agreement_subtitle,
+    x = NULL,
+    y = "Number of clinic notes",
+    fill = NULL
+  ) +
+  plot_theme_auc +
+  ggplot2::theme(
+    legend.position = "bottom",
+    panel.grid = ggplot2::element_blank(),
+    axis.text.y = ggplot2::element_blank(),
+    axis.ticks.y = ggplot2::element_blank(),
+    axis.text.x = ggplot2::element_text(
+      size = 12,
+      face = "bold",
+      margin = ggplot2::margin(t = 10)
+    )
+  )
+
+p_parallel_sets
